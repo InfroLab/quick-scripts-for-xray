@@ -2,38 +2,13 @@
 # ==============================================================================
 #  initial_network_setup
 #  Safe SSH + UFW + Fail2Ban + BBR setup with Full Restore
-#  - Default mode: RESTORE (safer)
-#  - Supports dry-run (prints actions, changes nothing)
-#  - Backs up configs into /var/backups/initial_network_setup/
-#  - Tracks what this script changed in /var/lib/initial_network_setup/state.json
-#  - Full restore puts back original files and UFW rules/state
-#
-#  Install:
-#    sudo cp initial_network_setup /usr/local/bin/initial_network_setup
-#    sudo chmod +x /usr/local/bin/initial_network_setup
-#
-#  Run:
-#    sudo initial_network_setup
-#
-#  Tested on Ubuntu 22.04 / 24.04 (systemd, ufw, openssh-server).
+#  - Defaults to RESTORE mode (safer)
+#  - Works with Ubuntu 22.04+
+#  - Supports self-install into /usr/local/bin
+#  - Automatically relaunches after install
 # ==============================================================================
 
 set -euo pipefail
-
-# --------------------------- Constants & Paths --------------------------------
-SCRIPT_NAME="initial_network_setup"
-INSTALL_PATH="/usr/local/bin/$SCRIPT_NAME"
-
-BACKUP_DIR="/var/backups/$SCRIPT_NAME"
-MARKER_DIR="/var/lib/$SCRIPT_NAME"
-MARKER_FILE="$MARKER_DIR/state.json"
-
-SSHD_CONFIG="/etc/ssh/sshd_config"
-SYSCTL_CONF="/etc/sysctl.conf"
-UFW_USER_RULES="/etc/ufw/user.rules"
-UFW_USER6_RULES="/etc/ufw/user6.rules"
-
-TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
 
 # ------------------------------- UI Helpers -----------------------------------
 banner() {
@@ -63,7 +38,6 @@ ask() {
   echo "$reply"
 }
 
-# DRY-RUN aware executor
 run_cmd() {
   if [[ "${DRYRUN:-no}" == "yes" ]]; then
     echo "[DRY-RUN] $*"
@@ -72,7 +46,6 @@ run_cmd() {
   fi
 }
 
-# ------------------------------ Sanity Checks ---------------------------------
 require_root() {
   if [[ "$(id -u)" -ne 0 ]]; then
     echo "❌ This script must be run as root (use sudo)."
@@ -80,34 +53,24 @@ require_root() {
   fi
 }
 
-# --------------------------- State/Backup Helpers ------------------------------
 ensure_dirs() {
   run_cmd "mkdir -p '$BACKUP_DIR' '$MARKER_DIR'"
 }
 
-# jq may not be installed on minimal systems; install unless dry-run
 ensure_jq() {
-  if command -v jq >/dev/null 2>&1; then
-    return
-  fi
+  if command -v jq >/dev/null 2>&1; then return; fi
   if [[ "${DRYRUN:-no}" == "yes" ]]; then
-    echo "[DRY-RUN] Would install jq (required to manage $MARKER_FILE)"
+    echo "[DRY-RUN] Would install jq (required for state.json)"
     return
   fi
-  echo "Installing jq (for state management)..."
   apt-get update -y
   apt-get install -y jq
 }
 
 state_get() {
   local key="$1"
-  if [[ ! -f "$MARKER_FILE" ]]; then
-    echo "unknown"; return
-  fi
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "unknown"; return
-  fi
-  jq -r --arg k "$key" '.[$k] // "unknown"' "$MARKER_FILE"
+  if [[ ! -f "$MARKER_FILE" ]]; then echo "unknown"; return; fi
+  jq -r --arg k "$key" '.[$k] // "unknown"' "$MARKER_FILE" || echo "unknown"
 }
 
 state_set() {
@@ -123,74 +86,19 @@ state_set() {
   mv "$tmp" "$MARKER_FILE"
 }
 
-# ------------------------------- UFW Helpers ----------------------------------
-ufw_is_active() {
-  ufw status 2>/dev/null | grep -qi "active"
-}
+# --------------------------- Paths & Constants --------------------------------
+SCRIPT_NAME="initial_network_setup"
+INSTALL_PATH="/usr/local/bin/$SCRIPT_NAME"
+BACKUP_DIR="/var/backups/$SCRIPT_NAME"
+MARKER_DIR="/var/lib/$SCRIPT_NAME"
+MARKER_FILE="$MARKER_DIR/state.json"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+SYSCTL_CONF="/etc/sysctl.conf"
+UFW_USER_RULES="/etc/ufw/user.rules"
+UFW_USER6_RULES="/etc/ufw/user6.rules"
+TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
 
-backup_ufw_state() {
-  # record whether UFW was installed and active before changes
-  local installed_before="false"
-  if command -v ufw >/dev/null 2>&1; then
-    installed_before="true"
-  fi
-  state_set "ufw_installed_before" "$installed_before"
-
-  local was_active="false"
-  if command -v ufw >/dev/null 2>&1 && ufw_is_active; then
-    was_active="true"
-  fi
-  state_set "ufw_was_active" "$was_active"
-
-  # Back up rules files if they exist
-  if [[ -f "$UFW_USER_RULES" ]]; then
-    run_cmd "cp '$UFW_USER_RULES' '$BACKUP_DIR/user.rules.bak.$TIMESTAMP'"
-    state_set "ufw_user_rules_backup" "$BACKUP_DIR/user.rules.bak.$TIMESTAMP"
-  else
-    state_set "ufw_user_rules_backup" "none"
-  fi
-
-  if [[ -f "$UFW_USER6_RULES" ]]; then
-    run_cmd "cp '$UFW_USER6_RULES' '$BACKUP_DIR/user6.rules.bak.$TIMESTAMP'"
-    state_set "ufw_user6_rules_backup" "$BACKUP_DIR/user6.rules.bak.$TIMESTAMP"
-  else
-    state_set "ufw_user6_rules_backup" "none"
-  fi
-}
-
-restore_ufw_state_full() {
-  local was_active; was_active="$(state_get ufw_was_active)"
-  local rules_bak; rules_bak="$(state_get ufw_user_rules_backup)"
-  local rules6_bak; rules6_bak="$(state_get ufw_user6_rules_backup)"
-
-  if ! command -v ufw >/dev/null 2>&1; then
-    echo "UFW not installed, skipping UFW restore."
-    return
-  fi
-
-  # Disable first to safely replace rule files
-  if ufw_is_active; then
-    run_cmd "ufw disable"
-  fi
-
-  # If we have backed-up rules, put them back
-  if [[ "$rules_bak" != "unknown" && "$rules_bak" != "none" && -f "$rules_bak" ]]; then
-    run_cmd "cp '$rules_bak' '$UFW_USER_RULES'"
-  fi
-  if [[ "$rules6_bak" != "unknown" && "$rules6_bak" != "none" && -f "$rules6_bak" ]]; then
-    run_cmd "cp '$rules6_bak' '$UFW_USER6_RULES'"
-  fi
-
-  # Re-enable only if UFW was active originally; otherwise keep disabled
-  if [[ "$was_active" == "true" ]]; then
-    run_cmd "ufw --force enable"
-    note "UFW restored and re-enabled to its previous state."
-  else
-    note "UFW restored and left disabled (it was disabled originally)."
-  fi
-}
-
-# ---------------------------- SSH Config Helpers ------------------------------
+# --------------------------- Backup / Restore Helpers -------------------------
 backup_sshd() {
   if [[ -f "$SSHD_CONFIG" ]]; then
     run_cmd "cp '$SSHD_CONFIG' '$BACKUP_DIR/sshd_config.bak.$TIMESTAMP'"
@@ -209,7 +117,6 @@ restore_sshd_latest() {
   fi
 }
 
-# ---------------------------- sysctl/BBR Helpers ------------------------------
 backup_sysctl() {
   if [[ -f "$SYSCTL_CONF" ]]; then
     run_cmd "cp '$SYSCTL_CONF' '$BACKUP_DIR/sysctl.conf.bak.$TIMESTAMP'"
@@ -225,7 +132,6 @@ restore_sysctl_latest_or_strip_bbr() {
     run_cmd "sysctl -p || true"
     note "sysctl.conf restored from $latest"
   else
-    # fallback: just remove our added lines if present
     run_cmd "sed -i '/^net.core.default_qdisc=fq$/d' '$SYSCTL_CONF' || true"
     run_cmd "sed -i '/^net.ipv4.tcp_congestion_control=bbr$/d' '$SYSCTL_CONF' || true"
     run_cmd "sysctl -p || true"
@@ -233,7 +139,31 @@ restore_sysctl_latest_or_strip_bbr() {
   fi
 }
 
-# ------------------------------- Self-Install ---------------------------------
+ufw_is_active() { ufw status 2>/dev/null | grep -qi "active"; }
+
+backup_ufw_state() {
+  local installed_before="false"; local was_active="false"
+  command -v ufw >/dev/null 2>&1 && installed_before="true"
+  [[ "$installed_before" == "true" ]] && ufw_is_active && was_active="true"
+  state_set "ufw_installed_before" "$installed_before"
+  state_set "ufw_was_active" "$was_active"
+  [[ -f "$UFW_USER_RULES" ]] && run_cmd "cp '$UFW_USER_RULES' '$BACKUP_DIR/user.rules.bak.$TIMESTAMP'" && state_set "ufw_user_rules_backup" "$BACKUP_DIR/user.rules.bak.$TIMESTAMP"
+  [[ -f "$UFW_USER6_RULES" ]] && run_cmd "cp '$UFW_USER6_RULES' '$BACKUP_DIR/user6.rules.bak.$TIMESTAMP'" && state_set "ufw_user6_rules_backup" "$BACKUP_DIR/user6.rules.bak.$TIMESTAMP"
+}
+
+restore_ufw_state_full() {
+  local was_active rules_bak rules6_bak
+  was_active="$(state_get ufw_was_active)"
+  rules_bak="$(state_get ufw_user_rules_backup)"
+  rules6_bak="$(state_get ufw_user6_rules_backup)"
+  command -v ufw >/dev/null 2>&1 || return
+  ufw_is_active && run_cmd "ufw disable"
+  [[ -f "$rules_bak" ]] && run_cmd "cp '$rules_bak' '$UFW_USER_RULES'"
+  [[ -f "$rules6_bak" ]] && run_cmd "cp '$rules6_bak' '$UFW_USER6_RULES'"
+  [[ "$was_active" == "true" ]] && run_cmd "ufw --force enable" && note "UFW restored and enabled." || note "UFW restored and left disabled."
+}
+
+# ---------------------------- Self-Install ------------------------------------
 offer_self_install() {
   if [[ "$0" != "$INSTALL_PATH" && ! -f "$INSTALL_PATH" ]]; then
     local ans
@@ -242,12 +172,14 @@ offer_self_install() {
       run_cmd "cp '$0' '$INSTALL_PATH'"
       run_cmd "chmod +x '$INSTALL_PATH'"
       note "Installed to $INSTALL_PATH"
+      # Relaunch from installed path
+      exec "$INSTALL_PATH" "$@"
     fi
   fi
 }
 
 # ==============================================================================
-#                                     MAIN
+#                                 MAIN
 # ==============================================================================
 require_root
 banner
@@ -267,87 +199,48 @@ offer_self_install
 # ------------------------------- RESTORE MODE ---------------------------------
 if [[ "$MODE" == "2" ]]; then
   note "RESTORE mode selected (full restore)."
-
-  # Dry-run question even for restore
   DRYRUN="$(ask 'Run in dry-run mode (only print actions, no changes)? (yes/no)' 'no')"
-
-  # Restore sshd_config
   restore_sshd_latest
-
-  # Restore sysctl (BBR off if it wasn’t originally)
   restore_sysctl_latest_or_strip_bbr
-
-  # Fail2Ban: remove only if our script installed it
-  if [[ "$(state_get fail2ban_installed_by_script)" == "true" ]]; then
-    run_cmd "systemctl stop fail2ban || true"
-    run_cmd "systemctl disable fail2ban || true"
-    run_cmd "apt-get remove -y fail2ban || true"
-    note "Fail2Ban removed (it was installed by this script)."
-  else
-    note "Skipping Fail2Ban removal (not installed by this script)."
-  fi
-
-  # UFW: fully restore previous rules/state
+  [[ "$(state_get fail2ban_installed_by_script)" == "true" ]] && run_cmd "systemctl stop fail2ban || true; systemctl disable fail2ban || true; apt-get remove -y fail2ban || true" && note "Fail2Ban removed."
   restore_ufw_state_full
-
-  # Restart SSH as a final step
   run_cmd "systemctl restart ssh || true"
-  note "Restore complete."
-
-  # Optional: mark restore timestamp (keep state for auditing)
   state_set "restored_at_utc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
+  note "Restore complete."
   exit 0
 fi
 
 # ------------------------------- INSTALL MODE ---------------------------------
 note "INSTALL mode selected."
-
-# Ask for dry-run up front
 DRYRUN="$(ask 'Run in dry-run mode (only print actions, no changes)? (yes/no)' 'no')"
 
-# 1) New SSH port (must include in firewall list too)
+# SSH Port
 while true; do
-  NEW_SSH_PORT="$(ask 'Enter new SSH port (required, cannot be 22; 1025-65534)' '')"
-  if [[ "$NEW_SSH_PORT" =~ ^[0-9]+$ ]] && [ "$NEW_SSH_PORT" -gt 1024 ] && [ "$NEW_SSH_PORT" -lt 65535 ] && [ "$NEW_SSH_PORT" -ne 22 ]; then
-    break
-  fi
+  NEW_SSH_PORT="$(ask 'Enter new SSH port (1025-65534, cannot be 22)' '')"
+  [[ "$NEW_SSH_PORT" =~ ^[0-9]+$ ]] && [ "$NEW_SSH_PORT" -gt 1024 ] && [ "$NEW_SSH_PORT" -lt 65535 ] && [ "$NEW_SSH_PORT" -ne 22 ] && break
   echo "Invalid port. Use an integer 1025-65534, not 22."
 done
 state_set "new_ssh_port" "$NEW_SSH_PORT"
 
-# Back up SSHD and update port
 backup_sshd
 if grep -qE '^[[:space:]]*Port[[:space:]]+' "$SSHD_CONFIG"; then
   run_cmd "sed -i 's/^[[:space:]]*Port[[:space:]].*/Port $NEW_SSH_PORT/' '$SSHD_CONFIG'"
 else
   run_cmd "printf '\\nPort %s\\n' '$NEW_SSH_PORT' >> '$SSHD_CONFIG'"
 fi
-note "SSH port set to $NEW_SSH_PORT in $SSHD_CONFIG"
+note "SSH port set to $NEW_SSH_PORT"
 
-# 2) Firewall ports list (must include new SSH port)
+# Firewall
 DEFAULT_PORTS="443,8443,8080,80,$NEW_SSH_PORT"
 PORT_LIST="$(ask "Enter comma-separated allowed ports (default: $DEFAULT_PORTS)" "$DEFAULT_PORTS")"
-if [[ ! ",$PORT_LIST," == *",$NEW_SSH_PORT,"* ]]; then
-  echo "❌ The list must include the new SSH port ($NEW_SSH_PORT)."; exit 1
-fi
+[[ ",$PORT_LIST," == *",$NEW_SSH_PORT,"* ]] || { echo "❌ Must include SSH port"; exit 1; }
 IFS=',' read -r -a PORTS <<< "$PORT_LIST"
 
-# 3) Enable BBR (unless user says no) — with backup
+# BBR
 ENABLE_BBR="$(ask 'Enable BBR congestion control? (yes/no)' 'yes')"
-if [[ "$ENABLE_BBR" == "yes" ]]; then
-  backup_sysctl
-  run_cmd "grep -q '^net.core.default_qdisc=fq$' '$SYSCTL_CONF' || echo 'net.core.default_qdisc=fq' >> '$SYSCTL_CONF'"
-  run_cmd "grep -q '^net.ipv4.tcp_congestion_control=bbr$' '$SYSCTL_CONF' || echo 'net.ipv4.tcp_congestion_control=bbr' >> '$SYSCTL_CONF'"
-  run_cmd "sysctl -p"
-  state_set "bbr_enabled_by_script" "true"
-  note "BBR enabled."
-else
-  state_set "bbr_enabled_by_script" "false"
-  note "BBR skipped."
-fi
+[[ "$ENABLE_BBR" == "yes" ]] && backup_sysctl && { run_cmd "grep -q '^net.core.default_qdisc=fq$' '$SYSCTL_CONF' || echo 'net.core.default_qdisc=fq' >> '$SYSCTL_CONF'"; run_cmd "grep -q '^net.ipv4.tcp_congestion_control=bbr$' '$SYSCTL_CONF' || echo 'net.ipv4.tcp_congestion_control=bbr' >> '$SYSCTL_CONF'"; run_cmd "sysctl -p"; state_set "bbr_enabled_by_script" "true"; note "BBR enabled.";} || state_set "bbr_enabled_by_script" "false"
 
-# 4) Install & Enable Fail2Ban (unless no)
+# Fail2Ban
 INSTALL_F2B="$(ask 'Install and enable Fail2Ban? (yes/no)' 'yes')"
 if [[ "$INSTALL_F2B" == "yes" ]]; then
   run_cmd "apt-get update -y"
@@ -355,57 +248,24 @@ if [[ "$INSTALL_F2B" == "yes" ]]; then
   run_cmd "systemctl enable fail2ban"
   run_cmd "systemctl start fail2ban"
   state_set "fail2ban_installed_by_script" "true"
-  note "Fail2Ban installed and started."
+  note "Fail2Ban installed."
 else
   state_set "fail2ban_installed_by_script" "false"
-  note "Fail2Ban skipped."
 fi
 
-# 5) Restart SSH now? (safe prompt)
+# Restart SSH
 RESTART_SSH="$(ask 'Restart SSH server now? (yes/no)' 'yes')"
-if [[ "$RESTART_SSH" == "yes" ]]; then
-  note "Restarting SSH..."
-  run_cmd "systemctl restart ssh"
+[[ "$RESTART_SSH" == "yes" ]] && run_cmd "systemctl restart ssh" || note "Remember to restart SSH later."
+
+# UFW
+ENABLE_UFW="$(ask 'Activate UFW now? (yes/no) — default NO' 'no')"
+if [[ "$ENABLE_UFW" != "yes" ]]; then
+  note "UFW not enabled. You can enable it later safely after updating allowed ports."
 else
-  note "Skipping SSH restart (remember to restart later to apply port change)."
+  run_cmd "ufw allow ${PORTS[*]}" || true
+  run_cmd "ufw --force enable"
+  note "UFW enabled and ports allowed."
 fi
 
-# 6) UFW activation, with full backup of prior state/rules
-ENABLE_UFW="$(ask 'Activate UFW now? (yes/no) — default NO (safer)' 'no')"
-if [[ "$ENABLE_UFW" == "no" ]]; then
-  state_set "ufw_action" "skipped"
-  note "UFW activation skipped. Exiting install."
-  state_set "installed_at_utc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  exit 0
-fi
-
-# Before enabling UFW, ensure user updated SSH client to new port
-echo
-echo "⚠️  IMPORTANT: Update your SSH client to use port $NEW_SSH_PORT BEFORE continuing."
-CONFIRM="$(ask "Type 'yes' to continue with UFW activation" 'no')"
-if [[ "$CONFIRM" != "yes" ]]; then
-  echo "Aborting to prevent lockout."; exit 1
-fi
-
-# Backup UFW state and rules *before* we touch it
-backup_ufw_state
-
-# Ensure UFW package exists
-if ! command -v ufw >/dev/null 2>&1; then
-  run_cmd "apt-get install -y ufw"
-fi
-
-# Baseline policy + open selected ports (both TCP/UDP)
-run_cmd "ufw default deny incoming"
-run_cmd "ufw default allow outgoing"
-for p in "${PORTS[@]}"; do
-  run_cmd "ufw allow ${p}/tcp"
-  run_cmd "ufw allow ${p}/udp"
-done
-run_cmd "ufw --force enable"
-state_set "ufw_action" "enabled"
-note "UFW enabled. Allowed ports: $PORT_LIST"
-
-# Final bookkeeping
+note "INSTALL complete. Remember to update settings if needed."
 state_set "installed_at_utc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-note "Install complete."
