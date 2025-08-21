@@ -54,7 +54,7 @@ require_root() {
 }
 
 ensure_dirs() {
-  run_cmd "mkdir -p '$BACKUP_DIR' '$MARKER_DIR'"
+  run_cmd mkdir -p "$BACKUP_DIR" "$MARKER_DIR"
 }
 
 ensure_jq() {
@@ -100,41 +100,30 @@ TIMESTAMP="$(date -u +%Y%m%d-%H%M%S)"
 
 # --------------------------- Backup / Restore Helpers -------------------------
 backup_sshd() {
-  if [[ -f "$SSHD_CONFIG" ]]; then
-    run_cmd "cp '$SSHD_CONFIG' '$BACKUP_DIR/sshd_config.bak.$TIMESTAMP'"
-    state_set "sshd_backup" "$BACKUP_DIR/sshd_config.bak.$TIMESTAMP"
-  fi
+  [[ -f "$SSHD_CONFIG" ]] && run_cmd cp "$SSHD_CONFIG" "$BACKUP_DIR/sshd_config.bak.$TIMESTAMP" && state_set "sshd_backup" "$BACKUP_DIR/sshd_config.bak.$TIMESTAMP"
 }
 
 restore_sshd_latest() {
   local latest
   latest="$(ls -t "$BACKUP_DIR"/sshd_config.bak.* 2>/dev/null | head -n1 || true)"
-  if [[ -n "$latest" ]]; then
-    run_cmd "cp '$latest' '$SSHD_CONFIG'"
-    note "Restored sshd_config from $latest"
-  else
-    note "No sshd_config backup found; skipping."
-  fi
+  [[ -n "$latest" ]] && run_cmd cp "$latest" "$SSHD_CONFIG" && note "Restored sshd_config from $latest" || note "No sshd_config backup found; skipping."
 }
 
 backup_sysctl() {
-  if [[ -f "$SYSCTL_CONF" ]]; then
-    run_cmd "cp '$SYSCTL_CONF' '$BACKUP_DIR/sysctl.conf.bak.$TIMESTAMP'"
-    state_set "sysctl_backup" "$BACKUP_DIR/sysctl.conf.bak.$TIMESTAMP"
-  fi
+  [[ -f "$SYSCTL_CONF" ]] && run_cmd cp "$SYSCTL_CONF" "$BACKUP_DIR/sysctl.conf.bak.$TIMESTAMP" && state_set "sysctl_backup" "$BACKUP_DIR/sysctl.conf.bak.$TIMESTAMP"
 }
 
 restore_sysctl_latest_or_strip_bbr() {
   local latest
   latest="$(ls -t "$BACKUP_DIR"/sysctl.conf.bak.* 2>/dev/null | head -n1 || true)"
   if [[ -n "$latest" ]]; then
-    run_cmd "cp '$latest' '$SYSCTL_CONF'"
-    run_cmd "sysctl -p || true"
+    run_cmd cp "$latest" "$SYSCTL_CONF"
+    run_cmd sysctl -p || true
     note "sysctl.conf restored from $latest"
   else
-    run_cmd "sed -i '/^net.core.default_qdisc=fq$/d' '$SYSCTL_CONF' || true"
-    run_cmd "sed -i '/^net.ipv4.tcp_congestion_control=bbr$/d' '$SYSCTL_CONF' || true"
-    run_cmd "sysctl -p || true"
+    run_cmd sed -i '/^net.core.default_qdisc=fq$/d' "$SYSCTL_CONF" || true
+    run_cmd sed -i '/^net.ipv4.tcp_congestion_control=bbr$/d' "$SYSCTL_CONF" || true
+    run_cmd sysctl -p || true
     note "Removed BBR lines from sysctl.conf (no backup found)."
   fi
 }
@@ -147,8 +136,8 @@ backup_ufw_state() {
   [[ "$installed_before" == "true" ]] && ufw_is_active && was_active="true"
   state_set "ufw_installed_before" "$installed_before"
   state_set "ufw_was_active" "$was_active"
-  [[ -f "$UFW_USER_RULES" ]] && run_cmd "cp '$UFW_USER_RULES' '$BACKUP_DIR/user.rules.bak.$TIMESTAMP'" && state_set "ufw_user_rules_backup" "$BACKUP_DIR/user.rules.bak.$TIMESTAMP"
-  [[ -f "$UFW_USER6_RULES" ]] && run_cmd "cp '$UFW_USER6_RULES' '$BACKUP_DIR/user6.rules.bak.$TIMESTAMP'" && state_set "ufw_user6_rules_backup" "$BACKUP_DIR/user6.rules.bak.$TIMESTAMP"
+  [[ -f "$UFW_USER_RULES" ]] && run_cmd cp "$UFW_USER_RULES" "$BACKUP_DIR/user.rules.bak.$TIMESTAMP" && state_set "ufw_user_rules_backup" "$BACKUP_DIR/user.rules.bak.$TIMESTAMP"
+  [[ -f "$UFW_USER6_RULES" ]] && run_cmd cp "$UFW_USER6_RULES" "$BACKUP_DIR/user6.rules.bak.$TIMESTAMP" && state_set "ufw_user6_rules_backup" "$BACKUP_DIR/user6.rules.bak.$TIMESTAMP"
 }
 
 restore_ufw_state_full() {
@@ -157,10 +146,10 @@ restore_ufw_state_full() {
   rules_bak="$(state_get ufw_user_rules_backup)"
   rules6_bak="$(state_get ufw_user6_rules_backup)"
   command -v ufw >/dev/null 2>&1 || return
-  ufw_is_active && run_cmd "ufw disable"
-  [[ -f "$rules_bak" ]] && run_cmd "cp '$rules_bak' '$UFW_USER_RULES'"
-  [[ -f "$rules6_bak" ]] && run_cmd "cp '$rules6_bak' '$UFW_USER6_RULES'"
-  [[ "$was_active" == "true" ]] && run_cmd "ufw --force enable" && note "UFW restored and enabled." || note "UFW restored and left disabled."
+  ufw_is_active && run_cmd ufw disable
+  [[ -f "$rules_bak" ]] && run_cmd cp "$rules_bak" "$UFW_USER_RULES"
+  [[ -f "$rules6_bak" ]] && run_cmd cp "$rules6_bak" "$UFW_USER6_RULES"
+  [[ "$was_active" == "true" ]] && run_cmd ufw --force enable && note "UFW restored and enabled." || note "UFW restored and left disabled."
 }
 
 # ---------------------------- Self-Install ------------------------------------
@@ -168,13 +157,7 @@ offer_self_install() {
   if [[ "$0" != "$INSTALL_PATH" && ! -f "$INSTALL_PATH" ]]; then
     local ans
     ans="$(ask "Install this script to $INSTALL_PATH so it can be run anywhere? (yes/no)" "yes")"
-    if [[ "$ans" == "yes" ]]; then
-      run_cmd "cp '$0' '$INSTALL_PATH'"
-      run_cmd "chmod +x '$INSTALL_PATH'"
-      note "Installed to $INSTALL_PATH"
-      # Relaunch from installed path
-      exec "$INSTALL_PATH" "$@"
-    fi
+    [[ "$ans" == "yes" ]] && run_cmd cp "$0" "$INSTALL_PATH" && run_cmd chmod +x "$INSTALL_PATH" && note "Installed to $INSTALL_PATH" && exec "$INSTALL_PATH" "$@"
   fi
 }
 
@@ -202,9 +185,9 @@ if [[ "$MODE" == "2" ]]; then
   DRYRUN="$(ask 'Run in dry-run mode (only print actions, no changes)? (yes/no)' 'no')"
   restore_sshd_latest
   restore_sysctl_latest_or_strip_bbr
-  [[ "$(state_get fail2ban_installed_by_script)" == "true" ]] && run_cmd "systemctl stop fail2ban || true; systemctl disable fail2ban || true; apt-get remove -y fail2ban || true" && note "Fail2Ban removed."
+  [[ "$(state_get fail2ban_installed_by_script)" == "true" ]] && run_cmd systemctl stop fail2ban && run_cmd systemctl disable fail2ban && run_cmd apt-get remove -y fail2ban && note "Fail2Ban removed."
   restore_ufw_state_full
-  run_cmd "systemctl restart ssh || true"
+  run_cmd systemctl restart ssh
   state_set "restored_at_utc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   note "Restore complete."
   exit 0
@@ -224,9 +207,9 @@ state_set "new_ssh_port" "$NEW_SSH_PORT"
 
 backup_sshd
 if grep -qE '^[[:space:]]*Port[[:space:]]+' "$SSHD_CONFIG"; then
-  run_cmd "sed -i 's/^[[:space:]]*Port[[:space:]].*/Port $NEW_SSH_PORT/' '$SSHD_CONFIG'"
+  run_cmd sed -i "s/^[[:space:]]*Port[[:space:]].*/Port $NEW_SSH_PORT/" "$SSHD_CONFIG"
 else
-  run_cmd "printf '\\nPort %s\\n' '$NEW_SSH_PORT' >> '$SSHD_CONFIG'"
+  run_cmd bash -c "printf '\nPort %s\n' '$NEW_SSH_PORT' >> '$SSHD_CONFIG'"
 fi
 note "SSH port set to $NEW_SSH_PORT"
 
@@ -238,15 +221,24 @@ IFS=',' read -r -a PORTS <<< "$PORT_LIST"
 
 # BBR
 ENABLE_BBR="$(ask 'Enable BBR congestion control? (yes/no)' 'yes')"
-[[ "$ENABLE_BBR" == "yes" ]] && backup_sysctl && { run_cmd "grep -q '^net.core.default_qdisc=fq$' '$SYSCTL_CONF' || echo 'net.core.default_qdisc=fq' >> '$SYSCTL_CONF'"; run_cmd "grep -q '^net.ipv4.tcp_congestion_control=bbr$' '$SYSCTL_CONF' || echo 'net.ipv4.tcp_congestion_control=bbr' >> '$SYSCTL_CONF'"; run_cmd "sysctl -p"; state_set "bbr_enabled_by_script" "true"; note "BBR enabled.";} || state_set "bbr_enabled_by_script" "false"
+if [[ "$ENABLE_BBR" == "yes" ]]; then
+  backup_sysctl
+  grep -q '^net.core.default_qdisc=fq$' "$SYSCTL_CONF" || echo 'net.core.default_qdisc=fq' >> "$SYSCTL_CONF"
+  grep -q '^net.ipv4.tcp_congestion_control=bbr$' "$SYSCTL_CONF" || echo 'net.ipv4.tcp_congestion_control=bbr' >> "$SYSCTL_CONF"
+  run_cmd sysctl -p
+  state_set "bbr_enabled_by_script" "true"
+  note "BBR enabled."
+else
+  state_set "bbr_enabled_by_script" "false"
+fi
 
 # Fail2Ban
 INSTALL_F2B="$(ask 'Install and enable Fail2Ban? (yes/no)' 'yes')"
 if [[ "$INSTALL_F2B" == "yes" ]]; then
-  run_cmd "apt-get update -y"
-  run_cmd "apt-get install -y fail2ban"
-  run_cmd "systemctl enable fail2ban"
-  run_cmd "systemctl start fail2ban"
+  run_cmd apt-get update -y
+  run_cmd apt-get install -y fail2ban
+  run_cmd systemctl enable fail2ban
+  run_cmd systemctl start fail2ban
   state_set "fail2ban_installed_by_script" "true"
   note "Fail2Ban installed."
 else
@@ -255,19 +247,19 @@ fi
 
 # Restart SSH
 RESTART_SSH="$(ask 'Restart SSH server now? (yes/no)' 'yes')"
-[[ "$RESTART_SSH" == "yes" ]] && run_cmd "systemctl restart ssh" || note "Remember to restart SSH later."
+[[ "$RESTART_SSH" == "yes" ]] && run_cmd systemctl restart ssh || note "Remember to restart SSH later."
 
 # UFW
 ENABLE_UFW="$(ask 'Activate UFW now? (yes/no) — default NO' 'no')"
-if [[ "$ENABLE_UFW" != "yes" ]]; then
-  note "UFW not enabled. You can enable it later safely after updating allowed ports."
-else
+if [[ "$ENABLE_UFW" == "yes" ]]; then
   for p in "${PORTS[@]}"; do
     run_cmd ufw allow "$p"/tcp
     run_cmd ufw allow "$p"/udp
   done
-  run_cmd "ufw --force enable"
+  run_cmd ufw --force enable
   note "UFW enabled and ports allowed."
+else
+  note "UFW not enabled. You can enable it later safely after updating allowed ports."
 fi
 
 note "INSTALL complete. Remember to update settings if needed."
