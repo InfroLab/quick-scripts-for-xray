@@ -42,7 +42,7 @@ run_cmd() {
   if [[ "${DRYRUN:-no}" == "yes" ]]; then
     echo "[DRY-RUN] $*"
   else
-    eval "$@"
+    "$@"
   fi
 }
 
@@ -263,8 +263,8 @@ if [[ "$ENABLE_UFW" != "yes" ]]; then
   note "UFW not enabled. You can enable it later safely after updating allowed ports."
 else
   for p in "${PORTS[@]}"; do
-    run_cmd "ufw allow $p/tcp" || true
-    run_cmd "ufw allow $p/udp" || true
+    run_cmd ufw allow "$p"/tcp
+    run_cmd ufw allow "$p"/udp
   done
   run_cmd "ufw --force enable"
   note "UFW enabled and ports allowed."
