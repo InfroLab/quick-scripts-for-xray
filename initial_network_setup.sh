@@ -262,7 +262,10 @@ ENABLE_UFW="$(ask 'Activate UFW now? (yes/no) — default NO' 'no')"
 if [[ "$ENABLE_UFW" != "yes" ]]; then
   note "UFW not enabled. You can enable it later safely after updating allowed ports."
 else
-  run_cmd "ufw allow ${PORTS[*]}" || true
+  for p in "${PORTS[@]}"; do
+    run_cmd "ufw allow $p/tcp" || true
+    run_cmd "ufw allow $p/udp" || true
+  done
   run_cmd "ufw --force enable"
   note "UFW enabled and ports allowed."
 fi
